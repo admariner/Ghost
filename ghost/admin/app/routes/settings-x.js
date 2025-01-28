@@ -3,21 +3,9 @@ import {inject as service} from '@ember/service';
 
 export default class SettingsXRoute extends AuthenticatedRoute {
     @service session;
+    @service feature;
     @service ui;
-
-    beforeModel() {
-        super.beforeModel(...arguments);
-
-        const user = this.session.user;
-
-        if (!user.isAdmin) {
-            return this.transitionTo('settings.staff.user', user);
-        }
-
-        if (!this.config.adminX?.url) {
-            return this.router.transitionTo('settings');
-        }
-    }
+    @service modals;
 
     activate() {
         super.activate(...arguments);
@@ -27,5 +15,11 @@ export default class SettingsXRoute extends AuthenticatedRoute {
     deactivate() {
         super.deactivate(...arguments);
         this.ui.set('isFullScreen', false);
+    }
+
+    buildRouteInfoMetadata() {
+        return {
+            bodyClasses: ['gh-body-fullscreen']
+        };
     }
 }

@@ -1,9 +1,13 @@
 const oembed = require('../../services/oembed');
 
-module.exports = {
+/** @type {import('@tryghost/api-framework').Controller} */
+const controller = {
     docName: 'oembed',
 
     read: {
+        headers: {
+            cacheInvalidate: false
+        },
         permissions: false,
         data: [
             'url',
@@ -17,3 +21,5 @@ module.exports = {
         }
     }
 };
+
+module.exports = controller;

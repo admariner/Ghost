@@ -7,7 +7,7 @@ jobs:
     if: github.repository_owner == 'TryGhost'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/stale@v7
+      - uses: actions/stale@v8
         with:
           stale-issue-message: |
             Our bot has automatically marked this issue as stale because there has not been any activity here in some time.
@@ -21,8 +21,8 @@ jobs:
             If we’ve missed reviewing your PR & you’re still interested in working on it, please let us know. Otherwise this PR will be closed shortly, but can always be reopened later. Thank you for understanding 🙂
           exempt-issue-labels: 'feature,pinned'
           exempt-pr-labels: 'feature,pinned'
-          days-before-stale: 120
-          days-before-pr-stale: -1
+          days-before-stale: 113
+          days-before-pr-stale: 358
           stale-issue-label: 'stale'
           stale-pr-label: 'stale'
           close-issue-reason: 'not_planned'
