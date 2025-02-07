@@ -32,27 +32,42 @@ describe('Slack', function () {
     it('listen() should initialise event correctly', function () {
         slack.listen();
         eventStub.calledTwice.should.be.true();
-        eventStub.firstCall.calledWith('post.published', slack.__get__('listener')).should.be.true();
-        eventStub.secondCall.calledWith('slack.test', slack.__get__('testPing')).should.be.true();
+        eventStub.firstCall.calledWith('post.published', slack.__get__('slackListener')).should.be.true();
+        eventStub.secondCall.calledWith('slack.test', slack.__get__('slackTestPing')).should.be.true();
     });
 
     it('listener() calls ping() with toJSONified model', function () {
         const testPost = _.clone(testUtils.DataGenerator.Content.posts[2]);
+        const testAuthor = _.clone(testUtils.DataGenerator.Content.users[0]);
 
         const testModel = {
             toJSON: function () {
                 return testPost;
+            },
+            related: function (relation) {
+                return {
+                    toJSON: function () {
+                        if (relation === 'authors') {
+                            return [testAuthor];
+                        }
+
+                        return [];
+                    }
+                };
             }
         };
 
         const pingStub = sinon.stub();
         const resetSlack = slack.__set__('ping', pingStub);
-        const listener = slack.__get__('listener');
+        const listener = slack.__get__('slackListener');
 
         listener(testModel);
 
         pingStub.calledOnce.should.be.true();
-        pingStub.calledWith(testPost).should.be.true();
+        pingStub.calledWith({
+            ...testPost,
+            authors: [testAuthor]
+        }).should.be.true();
 
         // Reset slack ping method
         resetSlack();
@@ -69,7 +84,7 @@ describe('Slack', function () {
 
         const pingStub = sinon.stub();
         const resetSlack = slack.__set__('ping', pingStub);
-        const listener = slack.__get__('listener');
+        const listener = slack.__get__('slackListener');
 
         listener(testModel, {importing: true});
 
@@ -82,7 +97,7 @@ describe('Slack', function () {
     it('testPing() calls ping() with default message', function () {
         const pingStub = sinon.stub();
         const resetSlack = slack.__set__('ping', pingStub);
-        const testPing = slack.__get__('testPing');
+        const testPing = slack.__get__('slackTestPing');
 
         testPing();
 
@@ -121,7 +136,10 @@ describe('Slack', function () {
             let requestUrl;
             let requestData;
 
-            const post = testUtils.DataGenerator.forKnex.createPost({slug: 'webhook-test'});
+            const post = testUtils.DataGenerator.forKnex.createPost({
+                slug: 'webhook-test',
+                html: `<p>Hello World!</p><p>This is a test post.</p><!--members-only--><p>This is members only content.</p>`
+            });
             urlService.getUrlByResourceId.withArgs(post.id, {absolute: true}).returns('http://myblog.com/' + post.slug + '/');
 
             settingsCacheStub.withArgs('slack_url').returns(slackURL);
@@ -140,7 +158,7 @@ describe('Slack', function () {
             requestUrl.should.equal(slackURL);
             requestData.attachments[0].title.should.equal(post.title);
             requestData.attachments[0].title_link.should.equal('http://myblog.com/webhook-test/');
-            requestData.attachments[0].fields[0].value.should.equal('## markdown.');
+            requestData.attachments[0].fields[0].value.should.equal('Hello World!This is a test post.');
             requestData.attachments[0].should.not.have.property('author_name');
             requestData.icon_url.should.equal('http://myblog.com/favicon.ico');
 
