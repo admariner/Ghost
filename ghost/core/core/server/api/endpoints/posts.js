@@ -1,6 +1,5 @@
+const urlUtils = require('../../../shared/url-utils');
 const models = require('../../models');
-const tpl = require('@tryghost/tpl');
-const errors = require('@tryghost/errors');
 const getPostServiceInstance = require('../../services/posts/posts-service');
 const allowedIncludes = [
     'tags',
@@ -21,19 +20,36 @@ const allowedIncludes = [
 ];
 const unsafeAttrs = ['status', 'authors', 'visibility'];
 
-const messages = {
-    postNotFound: 'Post not found.'
-};
-
 const postsService = getPostServiceInstance();
 
-module.exports = {
+/**
+ * @param {string} event
+ */
+function getCacheHeaderFromEventString(event, dto) {
+    if (event === 'published_updated' || event === 'unpublished') {
+        return true;
+    }
+    if (event === 'scheduled_updated' || event === 'draft_updated') {
+        return {
+            value: urlUtils.urlFor({
+                relativeUrl: urlUtils.urlJoin('/p', dto.uuid, '/')
+            })
+        };
+    }
+}
+
+/** @type {import('@tryghost/api-framework').Controller} */
+const controller = {
     docName: 'posts',
     browse: {
+        headers: {
+            cacheInvalidate: false
+        },
         options: [
             'include',
             'filter',
             'fields',
+            'collection',
             'formats',
             'limit',
             'order',
@@ -55,7 +71,7 @@ module.exports = {
             unsafeAttrs: unsafeAttrs
         },
         query(frame) {
-            return models.Post.findPage(frame.options);
+            return postsService.browsePosts(frame.options);
         }
     },
 
@@ -72,7 +88,8 @@ module.exports = {
                     const datetime = (new Date()).toJSON().substring(0, 10);
                     return `post-analytics.${datetime}.csv`;
                 }
-            }
+            },
+            cacheInvalidate: false
         },
         response: {
             format: 'plain'
@@ -89,6 +106,9 @@ module.exports = {
     },
 
     read: {
+        headers: {
+            cacheInvalidate: false
+        },
         options: [
             'include',
             'fields',
@@ -118,22 +138,15 @@ module.exports = {
             unsafeAttrs: unsafeAttrs
         },
         query(frame) {
-            return models.Post.findOne(frame.data, frame.options)
-                .then((model) => {
-                    if (!model) {
-                        throw new errors.NotFoundError({
-                            message: tpl(messages.postNotFound)
-                        });
-                    }
-
-                    return model;
-                });
+            return postsService.readPost(frame);
         }
     },
 
     add: {
         statusCode: 201,
-        headers: {},
+        headers: {
+            cacheInvalidate: false
+        },
         options: [
             'include',
             'formats',
@@ -155,10 +168,8 @@ module.exports = {
         query(frame) {
             return models.Post.add(frame.data.posts[0], frame.options)
                 .then((model) => {
-                    if (model.get('status') !== 'published') {
-                        this.headers.cacheInvalidate = false;
-                    } else {
-                        this.headers.cacheInvalidate = true;
+                    if (model.get('status') === 'published') {
+                        frame.setHeader('X-Cache-Invalidate', '/*');
                     }
 
                     return model;
@@ -167,7 +178,10 @@ module.exports = {
     },
 
     edit: {
-        headers: {},
+        headers: {
+            /** @type {boolean | {value: string}} */
+            cacheInvalidate: false
+        },
         options: [
             'include',
             'id',
@@ -177,6 +191,7 @@ module.exports = {
             'newsletter',
             'force_rerender',
             'save_revision',
+            'convert_to_lexical',
             // NOTE: only for internal context
             'forUpdate',
             'transacting'
@@ -198,9 +213,16 @@ module.exports = {
             unsafeAttrs: unsafeAttrs
         },
         async query(frame) {
-            let model = await postsService.editPost(frame);
-
-            this.headers.cacheInvalidate = postsService.handleCacheInvalidation(model);
+            let model = await postsService.editPost(frame, {
+                eventHandler: (event, dto) => {
+                    const cacheInvalidate = getCacheHeaderFromEventString(event, dto);
+                    if (cacheInvalidate === true) {
+                        frame.setHeader('X-Cache-Invalidate', '/*');
+                    } else if (cacheInvalidate?.value) {
+                        frame.setHeader('X-Cache-Invalidate', cacheInvalidate.value);
+                    }
+                }
+            });
 
             return model;
         }
@@ -286,7 +308,8 @@ module.exports = {
         headers: {
             location: {
                 resolve: postsService.generateCopiedPostLocationFromUrl
-            }
+            },
+            cacheInvalidate: false
         },
         options: [
             'id',
@@ -305,3 +328,5 @@ module.exports = {
         }
     }
 };
+
+module.exports = controller;

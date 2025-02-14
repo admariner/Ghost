@@ -37,6 +37,7 @@ module.exports = function MembersAPI({
         getSubject
     },
     models: {
+        DonationPaymentEvent,
         EmailRecipient,
         StripeCustomer,
         StripeCustomerSubscription,
@@ -69,7 +70,11 @@ module.exports = function MembersAPI({
     labsService,
     newslettersService,
     memberAttributionService,
-    emailSuppressionList
+    emailSuppressionList,
+    settingsCache,
+    sentry,
+    settingsHelpers,
+    captchaService
 }) {
     const tokenService = new TokenService({
         privateKey,
@@ -106,6 +111,7 @@ module.exports = function MembersAPI({
     });
 
     const eventRepository = new EventRepository({
+        DonationPaymentEvent,
         EmailRecipient,
         MemberSubscribeEvent,
         MemberPaidSubscriptionEvent,
@@ -119,7 +125,8 @@ module.exports = function MembersAPI({
         EmailSpamComplaintEvent,
         Comment,
         labsService,
-        memberAttributionService
+        memberAttributionService,
+        MemberEmailChangeEvent
     });
 
     const memberBREADService = new MemberBREADService({
@@ -139,7 +146,8 @@ module.exports = function MembersAPI({
         labsService,
         stripeService: stripeAPIService,
         memberAttributionService,
-        emailSuppressionList
+        emailSuppressionList,
+        settingsHelpers
     });
 
     const geolocationService = new GeolocationService();
@@ -150,7 +158,8 @@ module.exports = function MembersAPI({
         getSigninURL,
         getText,
         getHTML,
-        getSubject
+        getSubject,
+        sentry
     });
 
     const paymentsService = new PaymentsService({
@@ -159,7 +168,8 @@ module.exports = function MembersAPI({
         StripeCustomer,
         Offer,
         offersAPI,
-        stripeAPIService
+        stripeAPIService,
+        settingsCache
     });
 
     const memberController = new MemberController({
@@ -184,7 +194,10 @@ module.exports = function MembersAPI({
         tokenService,
         sendEmailWithMagicLink,
         memberAttributionService,
-        labsService
+        labsService,
+        newslettersService,
+        settingsCache,
+        sentry
     });
 
     const wellKnownController = new WellKnownController({
@@ -270,8 +283,16 @@ module.exports = function MembersAPI({
         return memberBREADService.read({email});
     }
 
-    async function getMemberIdentityToken(email) {
-        const member = await getMemberIdentityData(email);
+    async function getMemberIdentityDataFromTransientId(transientId) {
+        return memberBREADService.read({transient_id: transientId});
+    }
+
+    async function cycleTransientId(memberId) {
+        await users.cycleTransientId({id: memberId});
+    }
+
+    async function getMemberIdentityToken(transientId) {
+        const member = await getMemberIdentityDataFromTransientId(transientId);
         if (!member) {
             return null;
         }
@@ -304,7 +325,7 @@ module.exports = function MembersAPI({
         return getMemberIdentityData(email);
     }
 
-    const forwardError = fn => async (req, res, next) => {
+    const forwardError = fn => async function forwardErrorMw(req, res, next) {
         try {
             await fn(req, res, next);
         } catch (err) {
@@ -315,6 +336,7 @@ module.exports = function MembersAPI({
     const middleware = {
         sendMagicLink: Router().use(
             body.json(),
+            captchaService.getMiddleware(),
             forwardError((req, res) => routerController.sendMagicLink(req, res))
         ),
         createCheckoutSession: Router().use(
@@ -355,14 +377,16 @@ module.exports = function MembersAPI({
         if (!member) {
             return;
         }
-        await memberRepository.update({newsletters: []}, {id: member.id});
+        await memberRepository.update({email_disabled: true}, {id: member.id});
     });
 
     return {
         middleware,
         getMemberDataFromMagicLinkToken,
         getMemberIdentityToken,
+        getMemberIdentityDataFromTransientId,
         getMemberIdentityData,
+        cycleTransientId,
         setMemberGeolocationFromIp,
         getPublicConfig,
         bus,

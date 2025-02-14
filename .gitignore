@@ -19,6 +19,8 @@ lib-cov
 # Coverage directory used by tools like istanbul
 coverage
 coverage-e2e
+coverage-integration
+coverage-regression
 coverage_*
 
 # nyc test coverage
@@ -46,6 +48,11 @@ typings/
 # Optional npm cache directory
 .npm
 
+# Nx
+.nxcache
+.nx/cache
+.nx/workspace-data
+
 # Optional eslint cache
 .eslintcache
 
@@ -67,6 +74,7 @@ typings/
 *.sublime-*
 .vscode/*
 !.vscode/launch.json
+!.vscode/settings.json
 
 # OSX
 .DS_Store
@@ -77,6 +85,7 @@ typings/
 *.db
 *.db-journal
 
+/ghost/core/test-results/
 /ghost/core/core/server/data/export/exported*
 /ghost/core/content/tmp/*
 /ghost/core/content/data/*
@@ -91,6 +100,7 @@ typings/
 /ghost/core/content/adapters/storage/**/*
 /ghost/core/content/adapters/scheduling/**/*
 /ghost/core/content/themes/casper
+/ghost/core/content/themes/source
 !/ghost/core/README.md
 !/ghost/core/content/**/README.md
 
@@ -118,34 +128,54 @@ Caddyfile
 
 # Playwright state with cookies it keeps across tests
 /ghost/core/playwright-state.json
+/ghost/core/playwright-report
 
 # Admin
 /ghost/admin/dist
 
+# Comments-UI
+/apps/comments-ui/umd
+/apps/comments-ui/playwright-report
+/ghost/comments-ui/playwright/.cache/
+/apps/comments-ui/test-results/
+
 # Portal
-!/ghost/portal/.env
-/ghost/portal/umd
+!/apps/portal/.env
+/apps/portal/umd
 
 # Sodo-Search
-/ghost/sodo-search/public/main.css
-/ghost/sodo-search/umd
+/apps/sodo-search/public/main.css
+/apps/sodo-search/umd
 
 # Signup Form and local environments
-/ghost/signup-form/umd
-/ghost/signup-form/.env*.local
-/ghost/signup-form/test-results/
-/ghost/signup-form/playwright-report/
-/ghost/signup-form/playwright/.cache/
+/apps/signup-form/umd
+/apps/signup-form/.env*.local
+/apps/signup-form/test-results/
+/apps/signup-form/playwright-report/
+/apps/signup-form/playwright/.cache/
 
 # Announcement-Bar
-/ghost/announcement-bar/umd
+/apps/announcement-bar/umd
 
 # Build files
+/apps/*/build
 /ghost/*/build
 
 # Typescript build artifacts
-/ghost/*/tsconfig.tsbuildinfo
+tsconfig.tsbuildinfo
 
 # Admin X
-/ghost/admin-x-settings/dist
-/ghost/admin-x-settings/dist-ssr
+/apps/admin-x-settings/dist
+/apps/admin-x-settings/dist-ssr
+/apps/admin-x-settings/test-results/
+/apps/admin-x-settings/playwright-report/
+/apps/admin-x-settings/playwright/.cache/
+
+# Tinybird
+.tinyb
+.venv
+.diff_tmp
+
+# Docker Yarn Cache
+.yarncache
+.yarncachecopy

@@ -3,7 +3,7 @@ const sinon = require('sinon');
 const validate = require('../../../../../core/server/services/themes/validate');
 const list = require('../../../../../core/server/services/themes/list');
 const gscan = require('gscan');
-const assert = require('assert');
+const assert = require('assert/strict');
 const adapterManager = require('../../../../../core/server/services/adapter-manager');
 const InMemoryCache = require('../../../../../core/server/adapters/cache/MemoryCache');
 const logging = require('@tryghost/logging');
@@ -45,7 +45,7 @@ describe('Themes', function () {
             checkZipStub.resolves({});
             formatStub.returns({results: {error: []}});
 
-            return validate.check(testTheme.name, testTheme, true)
+            return validate.check(testTheme.name, testTheme, {isZip: true})
                 .then((checkedTheme) => {
                     checkZipStub.calledOnce.should.be.true();
                     checkZipStub.calledWith(testTheme).should.be.true();
@@ -61,7 +61,7 @@ describe('Themes', function () {
             checkStub.resolves({});
             formatStub.returns({results: {error: []}});
 
-            return validate.check(testTheme.name, testTheme, false)
+            return validate.check(testTheme.name, testTheme, {isZip: false})
                 .then((checkedTheme) => {
                     checkZipStub.callCount.should.be.equal(0);
                     checkStub.calledOnce.should.be.true();
@@ -91,7 +91,7 @@ describe('Themes', function () {
                 }
             });
 
-            return validate.check(testTheme.name, testTheme, true)
+            return validate.check(testTheme.name, testTheme, {isZip: true})
                 .then((checkedTheme) => {
                     checkZipStub.calledOnce.should.be.true();
                     checkZipStub.calledWith(testTheme).should.be.true();
@@ -120,7 +120,7 @@ describe('Themes', function () {
                 }
             });
 
-            return validate.check(testTheme.name, testTheme, false)
+            return validate.check(testTheme.name, testTheme, {isZip: false})
                 .then((checkedTheme) => {
                     checkStub.calledOnce.should.be.true();
                     checkStub.calledWith(testTheme.path).should.be.true();
@@ -135,7 +135,7 @@ describe('Themes', function () {
             checkZipStub.rejects(new Error('invalid zip file'));
             formatStub.returns({results: {error: []}});
 
-            return validate.check(testTheme.name, testTheme, true)
+            return validate.check(testTheme.name, testTheme, {isZip: true})
                 .then((checkedTheme) => {
                     checkedTheme.should.not.exist();
                 }).catch((error) => {

@@ -1,5 +1,5 @@
 const {configUtils} = require('../../../../utils/e2e-framework');
-const assert = require('assert');
+const assert = require('assert/strict');
 const nock = require('nock');
 const DomainEvents = require('@tryghost/domain-events');
 const {MilestoneCreatedEvent} = require('@tryghost/milestones');
@@ -9,7 +9,7 @@ describe('Slack Notifications Service', function () {
     let scope;
 
     beforeEach(function () {
-        configUtils.set('hostSettings', {milestones: {enabled: true, url: 'https://testhooks.slack.com/'}});
+        configUtils.set('hostSettings', {milestones: {enabled: true, url: 'https://testhooks.slack.com/', minThreshold: '100'}});
 
         scope = nock('https://testhooks.slack.com/')
             .post('/')
@@ -28,19 +28,19 @@ describe('Slack Notifications Service', function () {
             milestone: {
                 type: 'arr',
                 currency: 'usd',
-                name: 'arr-100-usd',
-                value: 100,
+                name: 'arr-1000-usd',
+                value: 1000,
                 createdAt: new Date(),
                 emailSentAt: new Date()
             },
             meta: {
-                currentValue: 105
+                currentValue: 1005
             }
         }));
 
         // Wait for the dispatched events (because this happens async)
         await DomainEvents.allSettled();
 
-        assert.strictEqual(scope.isDone(), true);
+        assert.equal(scope.isDone(), true);
     });
 });

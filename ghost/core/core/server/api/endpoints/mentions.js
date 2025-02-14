@@ -1,8 +1,12 @@
 const mentions = require('../../services/mentions');
 
-module.exports = {
+/** @type {import('@tryghost/api-framework').Controller} */
+const controller = {
     docName: 'mentions',
     browse: {
+        headers: {
+            cacheInvalidate: false
+        },
         options: [
             'filter',
             'fields',
@@ -20,7 +24,9 @@ module.exports = {
 
     receive: {
         statusCode: 202, // Required for the spec because we don't have a status page
-        headers: {},
+        headers: {
+            cacheInvalidate: false
+        },
         options: [],
         permissions: false,
         response: {
@@ -32,3 +38,5 @@ module.exports = {
         }
     }
 };
+
+module.exports = controller;

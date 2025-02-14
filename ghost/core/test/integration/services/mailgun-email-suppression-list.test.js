@@ -1,6 +1,6 @@
 const sinon = require('sinon');
 const {agentProvider, fixtureManager} = require('../../utils/e2e-framework');
-const assert = require('assert');
+const assert = require('assert/strict');
 const MailgunClient = require('@tryghost/mailgun-client');
 const DomainEvents = require('@tryghost/domain-events');
 const emailAnalytics = require('../../../core/server/services/email-analytics');
@@ -44,7 +44,7 @@ describe('MailgunEmailSuppressionList', function () {
             recipient
         })];
 
-        await emailAnalytics.fetchLatest();
+        await emailAnalytics.fetchLatestOpenedEvents();
         await DomainEvents.allSettled();
 
         const {body: {members: [memberAfter]}} = await agent.get(`/members/${memberId}`);
@@ -72,7 +72,7 @@ describe('MailgunEmailSuppressionList', function () {
             recipient
         })];
 
-        await emailAnalytics.fetchLatest();
+        await emailAnalytics.fetchLatestOpenedEvents();
         await DomainEvents.allSettled();
 
         const {body: {members: [memberAfter]}} = await agent.get(`/members/${memberId}`);
@@ -100,7 +100,7 @@ describe('MailgunEmailSuppressionList', function () {
             recipient
         })];
 
-        await emailAnalytics.fetchLatest();
+        await emailAnalytics.fetchLatestOpenedEvents();
         await DomainEvents.allSettled();
 
         const {body: {members: [memberAfter]}} = await agent.get(`/members/${memberId}`);
@@ -128,7 +128,7 @@ describe('MailgunEmailSuppressionList', function () {
             recipient
         })];
 
-        await emailAnalytics.fetchLatest();
+        await emailAnalytics.fetchLatestOpenedEvents();
         await DomainEvents.allSettled();
 
         const {body: {members: [memberAfter]}} = await agent.get(`/members/${memberId}`);
@@ -163,7 +163,7 @@ describe('MailgunEmailSuppressionList', function () {
             timestamp: Math.round(timestamp.getTime() / 1000)
         }];
 
-        await emailAnalytics.fetchLatest();
+        await emailAnalytics.fetchLatestOpenedEvents();
         await DomainEvents.allSettled();
 
         const {body: {members: [memberAfter]}} = await agent.get(`/members/${memberId}`);

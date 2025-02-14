@@ -1,9 +1,9 @@
 import Model, {attr, belongsTo} from '@ember-data/model';
 
 export default class PostRevisionModel extends Model {
-  @belongsTo('post') post;
   @attr('string') lexical;
   @attr('string') title;
+  @attr('string') customExcerpt;
   @attr('string') featureImage;
   @attr('string') featureImageAlt;
   @attr('string') featureImageCaption;
