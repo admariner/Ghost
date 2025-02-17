@@ -8,6 +8,7 @@ const _ = require('lodash');
 
 // Ghost Internals
 const models = require('../../core/server/models');
+models.init();
 
 // Other Test Utilities
 const e2eUtils = require('./e2e-utils');
@@ -135,7 +136,6 @@ module.exports = {
 
     initFixtures: initFixtures,
     initData: dbUtils.initData,
-    clearData: dbUtils.clearData,
     setupRedirectsFile: redirects.setupFile,
 
     fixtures: fixtureUtils.fixtures,

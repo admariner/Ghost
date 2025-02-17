@@ -2,7 +2,7 @@
 // const testUtils = require('./utils');
 require('./utils');
 const {OutboundLinkTagger} = require('../');
-const assert = require('assert');
+const assert = require('assert/strict');
 
 describe('OutboundLinkTagger', function () {
     describe('Constructor', function () {
@@ -189,7 +189,7 @@ describe('OutboundLinkTagger', function () {
                 }
             });
             const html = await service.addToHtml('<a href="test">Hello world</a><a href="">Hello world</a>');
-            assert.equal(html, '<a href="test">Hello world</a><a href>Hello world</a>');
+            assert.equal(html, '<a href="test">Hello world</a><a href="">Hello world</a>');
         });
 
         it('keeps HTML if throws', async function () {

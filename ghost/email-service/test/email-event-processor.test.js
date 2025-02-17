@@ -1,6 +1,6 @@
-const assert = require('assert');
+const assert = require('assert/strict');
 const EmailEventProcessor = require('../lib/EmailEventProcessor');
-const {createDb} = require('./utils');
+const {createDb, createPrometheusClient} = require('./utils');
 const sinon = require('sinon');
 
 describe('Email Event Processor', function () {
@@ -8,14 +8,14 @@ describe('Email Event Processor', function () {
     let eventStorage;
     let db;
     let domainEvents;
-
+    let prometheusClient;
     beforeEach(function () {
         db = createDb({first: {
             emailId: 'fetched-email-id',
             member_id: 'member-id',
             id: 'email-recipient-id'
         }});
-
+        prometheusClient = createPrometheusClient();
         domainEvents = {
             dispatch: sinon.stub()
         };
@@ -32,7 +32,8 @@ describe('Email Event Processor', function () {
         eventProcessor = new EmailEventProcessor({
             db,
             domainEvents,
-            eventStorage
+            eventStorage,
+            prometheusClient
         });
     });
 
@@ -58,7 +59,7 @@ describe('Email Event Processor', function () {
     describe('getRecipient', function () {
         it('Returns undefined if both providerId and emailId are missing', async function () {
             const recipient = await eventProcessor.getRecipient({});
-            assert.strictEqual(recipient, undefined);
+            assert.equal(recipient, undefined);
         });
 
         it('Uses emailId to query recipient', async function () {
@@ -82,13 +83,13 @@ describe('Email Event Processor', function () {
         it('Returns undefined if no email found for provider', async function () {
             sinon.stub(db, 'first').resolves(null);
             const recipient = await eventProcessor.getRecipient({providerId: 'provider-id', email: 'example@example.com'});
-            assert.strictEqual(recipient, undefined);
+            assert.equal(recipient, undefined);
         });
 
         it('Returns undefined if no recipient found for email', async function () {
             sinon.stub(db, 'first').resolves(null);
             const recipient = await eventProcessor.getRecipient({emailId: 'email-id', email: 'example@example.com'});
-            assert.strictEqual(recipient, undefined);
+            assert.equal(recipient, undefined);
         });
     });
 
@@ -169,6 +170,32 @@ describe('Email Event Processor', function () {
             const event = eventStorage.handleComplained.firstCall.args[0];
             assert.equal(event.email, 'example@example.com');
             assert.equal(event.constructor.name, 'SpamComplaintEvent');
+        });
+    });
+
+    describe('recordEventProcessed', function () {
+        it('records the event processed metric', function () {
+            const incStub = sinon.stub();
+            prometheusClient = createPrometheusClient({incStub});
+            eventProcessor = new EmailEventProcessor({
+                db,
+                domainEvents,
+                eventStorage,
+                prometheusClient
+            });
+            eventProcessor.recordEventProcessed('delivered');
+            assert(incStub.calledOnce);
+        });
+
+        it('does not throw if recording the event metric fails', function () {
+            prometheusClient = createPrometheusClient({incStub: sinon.stub().throws()});
+            eventProcessor = new EmailEventProcessor({
+                db,
+                domainEvents,
+                eventStorage,
+                prometheusClient
+            });
+            assert.doesNotThrow(() => eventProcessor.recordEventProcessed('delivered'));
         });
     });
 });

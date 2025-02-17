@@ -1,4 +1,4 @@
-const assert = require('assert');
+const assert = require('assert/strict');
 const sinon = require('sinon');
 const VersionNotificationsDataService = require('..');
 
@@ -189,6 +189,28 @@ describe('Version Notification Data Service', function () {
 
             assert.equal(integrationName, 'Tri Hita Karana');
             assert.equal(integrationType, 'core');
+        });
+
+        it('Returns null when the api-key/integration is not found', async function () {
+            const ApiKeyModel = {
+                findOne: sinon
+                    .stub()
+                    .withArgs({
+                        id: 'key_id'
+                    }, {
+                        withRelated: ['integration']
+                    })
+                    .resolves(null)
+            };
+
+            const versionNotificationsDataService = new VersionNotificationsDataService({
+                UserModel: {},
+                ApiKeyModel,
+                settingsService: {}
+            });
+
+            const integration = await versionNotificationsDataService.getIntegration('key_id', 'admin');
+            assert.equal(integration, null);
         });
     });
 });
