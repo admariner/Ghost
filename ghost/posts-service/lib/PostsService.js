@@ -3,7 +3,16 @@ const {BadRequestError} = require('@tryghost/errors');
 const tpl = require('@tryghost/tpl');
 const errors = require('@tryghost/errors');
 const ObjectId = require('bson-objectid').default;
-const omit = require('lodash/omit');
+const pick = require('lodash/pick');
+const DomainEvents = require('@tryghost/domain-events');
+const {
+    PostsBulkDestroyedEvent,
+    PostsBulkUnpublishedEvent,
+    PostsBulkUnscheduledEvent,
+    PostsBulkFeaturedEvent,
+    PostsBulkUnfeaturedEvent,
+    PostsBulkAddTagsEvent
+} = require('@tryghost/post-events');
 
 const messages = {
     invalidVisibilityFilter: 'Invalid visibility filter.',
@@ -11,7 +20,8 @@ const messages = {
     invalidTiers: 'Invalid tiers value.',
     invalidTags: 'Invalid tags value.',
     invalidEmailSegment: 'The email segment parameter doesn\'t contain a valid filter',
-    unsupportedBulkAction: 'Unsupported bulk action'
+    unsupportedBulkAction: 'Unsupported bulk action',
+    postNotFound: 'Post not found.'
 };
 
 class PostsService {
@@ -24,7 +34,40 @@ class PostsService {
         this.postsExporter = postsExporter;
     }
 
-    async editPost(frame) {
+    /**
+     *
+     * @param {Object} options - frame options
+     * @returns {Promise<Object>}
+     */
+    async browsePosts(options) {
+        const posts = await this.models.Post.findPage(options);
+        return posts;
+    }
+
+    async readPost(frame) {
+        const model = await this.models.Post.findOne(frame.data, frame.options);
+
+        if (!model) {
+            throw new errors.NotFoundError({
+                message: tpl(messages.postNotFound)
+            });
+        }
+
+        return model.toJSON(frame.options);
+    }
+
+    /**
+     * @typedef {'published_updated' | 'scheduled_updated' | 'draft_updated' | 'unpublished'} EventString
+     */
+
+    /**
+     *
+     * @param {import('@tryghost/api-framework').Frame} frame
+     * @param {object} [options]
+     * @param {(event: EventString, dto: any) => Promise<void> | void} [options.eventHandler] - Called before the editPost method resolves with an event string
+     * @returns
+     */
+    async editPost(frame, options) {
         // Make sure the newsletter is matching an active newsletter
         // Note that this option is simply ignored if the post isn't published or scheduled
         if (frame.options.newsletter && frame.options.email_segment) {
@@ -62,7 +105,34 @@ class PostsService {
             }
         }
 
-        return model;
+        const dto = model.toJSON(frame.options);
+
+        if (typeof options?.eventHandler === 'function') {
+            await options.eventHandler(this.getChanges(model), dto);
+        }
+
+        return dto;
+    }
+    /**
+     * @param {any} model
+     * @returns {EventString}
+     */
+    getChanges(model) {
+        if (model.get('status') === 'published' && model.wasChanged()) {
+            return 'published_updated';
+        }
+
+        if (model.get('status') === 'draft' && model.previous('status') === 'published') {
+            return 'unpublished';
+        }
+
+        if (model.get('status') === 'draft' && model.previous('status') !== 'published') {
+            return 'draft_updated';
+        }
+
+        if (model.get('status') === 'scheduled' && model.wasChanged()) {
+            return 'scheduled_updated';
+        }
     }
 
     #mergeFilters(...filters) {
@@ -71,13 +141,35 @@ class PostsService {
 
     async bulkEdit(data, options) {
         if (data.action === 'unpublish') {
-            return await this.#updatePosts({status: 'draft'}, {filter: this.#mergeFilters('status:published', options.filter), context: options.context, actionName: 'unpublished'});
+            const updateResult = await this.#updatePosts({status: 'draft'}, {filter: this.#mergeFilters('status:published', options.filter), context: options.context, actionName: 'unpublished'});
+            DomainEvents.dispatch(PostsBulkUnpublishedEvent.create(updateResult.editIds));
+
+            return updateResult;
+        }
+        if (data.action === 'unschedule') {
+            const updateResult = await this.#updatePosts({status: 'draft', published_at: null}, {filter: this.#mergeFilters('status:scheduled', options.filter), context: options.context, actionName: 'unscheduled'});
+            // makes sure `email_only` value is reverted for the unscheduled posts
+            await this.models.Post.bulkEdit(updateResult.editIds, 'posts_meta', {
+                data: {email_only: false},
+                column: 'post_id',
+                transacting: options.transacting,
+                throwErrors: true
+            });
+            DomainEvents.dispatch(PostsBulkUnscheduledEvent.create(updateResult.editIds));
+
+            return updateResult;
         }
         if (data.action === 'feature') {
-            return await this.#updatePosts({featured: true}, {filter: options.filter, context: options.context, actionName: 'featured'});
+            const updateResult = await this.#updatePosts({featured: true}, {filter: options.filter, context: options.context, actionName: 'featured'});
+            DomainEvents.dispatch(PostsBulkFeaturedEvent.create(updateResult.editIds));
+
+            return updateResult;
         }
         if (data.action === 'unfeature') {
-            return await this.#updatePosts({featured: false}, {filter: options.filter, context: options.context, actionName: 'unfeatured'});
+            const updateResult = await this.#updatePosts({featured: false}, {filter: options.filter, context: options.context, actionName: 'unfeatured'});
+            DomainEvents.dispatch(PostsBulkUnfeaturedEvent.create(updateResult.editIds));
+
+            return updateResult;
         }
         if (data.action === 'access') {
             if (!['public', 'members', 'paid', 'tiers'].includes(data.meta.visibility)) {
@@ -114,7 +206,11 @@ class PostsService {
                     });
                 }
             }
-            return await this.#bulkAddTags({tags: data.meta.tags}, {filter: options.filter, context: options.context});
+
+            const bulkResult = await this.#bulkAddTags({tags: data.meta.tags}, {filter: options.filter, context: options.context});
+            DomainEvents.dispatch(PostsBulkAddTagsEvent.create(bulkResult.editIds));
+
+            return bulkResult;
         }
         throw new errors.IncorrectUsageError({
             message: tpl(messages.unsupportedBulkAction)
@@ -128,6 +224,7 @@ class PostsService {
      * @param {string} options.filter - An NQL Filter
      * @param {object} options.context
      * @param {object} [options.transacting]
+     * @returns {Promise<{successful: number, unsuccessful: number, editIds: string[]}>}
      */
     async #bulkAddTags(data, options) {
         if (!options.transacting) {
@@ -168,15 +265,21 @@ class PostsService {
         await this.models.Post.addActions('edited', postRows.map(p => p.id), options);
 
         return {
+            editIds: postRows.map(p => p.id),
             successful: postRows.length,
             unsuccessful: 0
         };
     }
 
-    async bulkDestroy(options) {
+    /**
+     *
+     * @param {Object} options
+     * @returns Promise<{successful: number, unsuccessful: number, deleteIds: string[]}>
+     */
+    async #bulkDestroy(options) {
         if (!options.transacting) {
             return await this.models.Post.transaction(async (transacting) => {
-                return await this.bulkDestroy({
+                return await this.#bulkDestroy({
                     ...options,
                     transacting
                 });
@@ -240,7 +343,18 @@ class PostsService {
 
         // Posts and emails
         await this.models.Post.bulkDestroy(deleteEmailIds, 'emails', {transacting: options.transacting, throwErrors: true});
-        return await this.models.Post.bulkDestroy(deleteIds, 'posts', {...options, throwErrors: true});
+        const result = await this.models.Post.bulkDestroy(deleteIds, 'posts', {...options, throwErrors: true});
+
+        result.deleteIds = deleteIds;
+
+        return result;
+    }
+
+    async bulkDestroy(options) {
+        const result = await this.#bulkDestroy(options);
+        DomainEvents.dispatch(PostsBulkDestroyedEvent.create(result.deleteIds));
+
+        return result;
     }
 
     async export(frame) {
@@ -305,6 +419,8 @@ class PostsService {
                 throwErrors: true
             });
         }
+
+        result.editIds = editIds;
 
         return result;
     }
@@ -373,21 +489,24 @@ class PostsService {
             status: 'all'
         }, frame.options);
 
-        const newPostData = omit(
+        const newPostData = pick(
             existingPost.attributes,
             [
-                'id',
-                'uuid',
-                'slug',
-                'comment_id',
-                'created_at',
-                'created_by',
-                'updated_at',
-                'updated_by',
-                'published_at',
-                'published_by',
-                'canonical_url',
-                'count__clicks'
+                'title',
+                'mobiledoc',
+                'lexical',
+                'html',
+                'plaintext',
+                'feature_image',
+                'featured',
+                'type',
+                'locale',
+                'visibility',
+                'email_recipient_filter',
+                'custom_excerpt',
+                'codeinjection_head',
+                'codeinjection_foot',
+                'custom_template'
             ]
         );
 
@@ -401,11 +520,21 @@ class PostsService {
         const existingPostMeta = existingPost.related('posts_meta');
 
         if (existingPostMeta.isNew() === false) {
-            newPostData.posts_meta = omit(
+            newPostData.posts_meta = pick(
                 existingPostMeta.attributes,
                 [
-                    'id',
-                    'post_id'
+                    'og_image',
+                    'og_title',
+                    'og_description',
+                    'twitter_image',
+                    'twitter_title',
+                    'twitter_description',
+                    'meta_title',
+                    'meta_description',
+                    'frontmatter',
+                    'feature_image_alt',
+                    'feature_image_caption',
+                    'hide_title_and_feature_image'
                 ]
             );
         }

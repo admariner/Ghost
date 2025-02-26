@@ -65,8 +65,7 @@ describe('Dynamic Routing', function () {
 
                     $('title').text().should.equal('Ghost');
                     $('body.home-template').length.should.equal(1);
-                    $('article.post').length.should.equal(5);
-                    $('article.tag-getting-started').length.should.equal(5);
+                    $('article.post').length.should.equal(7);
 
                     done();
                 });
@@ -110,15 +109,10 @@ describe('Dynamic Routing', function () {
     });
 
     describe('Tag', function () {
-        before(function (done) {
-            testUtils.clearData().then(function () {
-                // we initialise data, but not a user. No user should be required for navigating the frontend
-                return testUtils.initData();
-            }).then(function () {
-                return testUtils.fixtures.overrideOwnerUser('ghost-owner');
-            }).then(function () {
-                done();
-            }).catch(done);
+        before(async function () {
+            await testUtils.teardownDb();
+            await testUtils.initData();
+            await testUtils.fixtures.overrideOwnerUser('ghost-owner');
         });
 
         after(testUtils.teardownDb);
@@ -142,9 +136,8 @@ describe('Dynamic Routing', function () {
                     should.not.exist(res.headers['set-cookie']);
                     should.exist(res.headers.date);
 
-                    $('body').attr('class').should.eql('tag-template tag-getting-started');
+                    $('body').attr('class').should.eql('tag-template tag-getting-started has-sans-title has-sans-body');
                     $('article.post').length.should.equal(5);
-                    $('article.tag-getting-started').length.should.equal(5);
 
                     done();
                 });
@@ -272,7 +265,7 @@ describe('Dynamic Routing', function () {
         const ownerSlug = 'ghost-owner';
 
         before(function (done) {
-            testUtils.clearData().then(function () {
+            testUtils.teardownDb().then(function () {
                 // we initialise data, but not a user. No user should be required for navigating the frontend
                 return testUtils.initData();
             }).then(function () {
@@ -456,7 +449,7 @@ describe('Dynamic Routing', function () {
         describe('Paged', function () {
             // Add enough posts to trigger pages
             before(function (done) {
-                testUtils.clearData().then(function () {
+                testUtils.teardownDb().then(function () {
                     // we initialize data, but not a user. No user should be required for navigating the frontend
                     return testUtils.initData();
                 }).then(function () {

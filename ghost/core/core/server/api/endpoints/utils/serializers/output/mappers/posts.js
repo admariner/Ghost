@@ -19,12 +19,23 @@ const postsService = getPostServiceInstance();
 
 const commentsService = require('../../../../../../services/comments');
 const memberAttribution = require('../../../../../../services/member-attribution');
-const labs = require('../../../../../../../shared/labs');
 
 module.exports = async (model, frame, options = {}) => {
     const {tiers: tiersData} = options || {};
 
-    const jsonModel = model.toJSON(frame.options);
+    // NOTE: `model` is now overloaded and may be a bookshelf model or a POJO
+    let jsonModel = model;
+    if (typeof model.toJSON === 'function') {
+        jsonModel = model.toJSON(frame.options);
+    } else {
+        // This is to satisfy the interface which extraAttrs needs
+        model = {
+            id: jsonModel.id,
+            get(attr) {
+                return jsonModel[attr];
+            }
+        };
+    }
 
     // Map email_recipient_filter to email_segment
     jsonModel.email_segment = jsonModel.email_recipient_filter;
@@ -34,6 +45,16 @@ module.exports = async (model, frame, options = {}) => {
 
     extraAttrs.forPost(frame.options, model, jsonModel);
 
+    const defaultFormats = ['html'];
+    const formatsToKeep = frame.options.formats || frame.options.columns || defaultFormats;
+
+    // Iterate over all known formats, and if they are not in the keep list, remove them
+    _.each(['mobiledoc', 'lexical', 'html', 'plaintext'], function (format) {
+        if (formatsToKeep.indexOf(format) === -1) {
+            delete jsonModel[format];
+        }
+    });
+
     // Attach tiers to custom nql visibility filter
     if (jsonModel.visibility) {
         if (['members', 'public'].includes(jsonModel.visibility) && jsonModel.tiers) {
@@ -42,6 +63,10 @@ module.exports = async (model, frame, options = {}) => {
 
         if (jsonModel.visibility === 'paid' && jsonModel.tiers) {
             jsonModel.tiers = tiersData ? tiersData.filter(t => t.type === 'paid') : [];
+        }
+
+        if (jsonModel.visibility === 'tiers' && Array.isArray(jsonModel.tiers)) {
+            jsonModel.tiers = jsonModel.tiers.filter(t => t.type === 'paid');
         }
 
         if (!['members', 'public', 'paid', 'tiers'].includes(jsonModel.visibility)) {
@@ -55,6 +80,7 @@ module.exports = async (model, frame, options = {}) => {
     if (utils.isContentAPI(frame)) {
         date.forPost(jsonModel);
         gating.forPost(jsonModel, frame);
+
         if (jsonModel.access) {
             if (commentsService?.api?.enabled !== 'off') {
                 jsonModel.comments = true;
@@ -65,13 +91,13 @@ module.exports = async (model, frame, options = {}) => {
             jsonModel.comments = false;
         }
 
-        // Add  outbound link tags
-        if (labs.isSet('outboundLinkTagging')) {
-            // Only add it in the flag! Without the flag we only add it to emails.
-            if (jsonModel.html) {
-                // Only set if HTML was requested
-                jsonModel.html = await memberAttribution.outboundLinkTagger.addToHtml(jsonModel.html);
-            }
+        // Strip any source formats
+        delete jsonModel.mobiledoc;
+        delete jsonModel.lexical;
+
+        // Add outbound link tagging if we have the HTML
+        if (jsonModel.html) {
+            jsonModel.html = await memberAttribution.outboundLinkTagger.addToHtml(jsonModel.html);
         }
     }
 

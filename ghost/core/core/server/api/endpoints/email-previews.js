@@ -1,9 +1,13 @@
 const emailService = require('../../services/email-service');
 
-module.exports = {
+/** @type {import('@tryghost/api-framework').Controller} */
+const controller = {
     docName: 'email_previews',
 
     read: {
+        headers: {
+            cacheInvalidate: false
+        },
         options: [
             'fields',
             'memberSegment',
@@ -25,7 +29,9 @@ module.exports = {
     },
     sendTestEmail: {
         statusCode: 204,
-        headers: {},
+        headers: {
+            cacheInvalidate: false
+        },
         options: [
             'id'
         ],
@@ -42,3 +48,5 @@ module.exports = {
         }
     }
 };
+
+module.exports = controller;

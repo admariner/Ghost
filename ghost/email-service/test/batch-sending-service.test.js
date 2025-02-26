@@ -1,10 +1,16 @@
 const {createModel, createModelClass, createDb, sleep} = require('./utils');
 const BatchSendingService = require('../lib/BatchSendingService');
 const sinon = require('sinon');
-const assert = require('assert');
+const assert = require('assert/strict');
 const logging = require('@tryghost/logging');
 const nql = require('@tryghost/nql');
 const errors = require('@tryghost/errors');
+
+// We need a short sleep in some tests to simulate time passing
+// This way we don't actually add a delay to the tests
+const simulateSleep = async (ms, clock) => {
+    await Promise.all([sleep(ms), clock.tickAsync(ms)]);
+};
 
 describe('Batch Sending Service', function () {
     let errorLog;
@@ -220,7 +226,12 @@ describe('Batch Sending Service', function () {
                 ]
             });
             const service = new BatchSendingService({
-                models: {EmailBatch}
+                models: {EmailBatch},
+                sendingService: {
+                    getTargetDeliveryWindow() {
+                        return 0;
+                    }
+                }
             });
             const email = createModel({
                 status: 'submitting',
@@ -265,6 +276,32 @@ describe('Batch Sending Service', function () {
             const argument = sendBatches.firstCall.args[0];
             assert.equal(argument.batches, createdBatches);
         });
+
+        it('passes deadline to sendBatches if target delivery window is set', async function () {
+            const EmailBatch = createModelClass({
+                findAll: []
+            });
+            const service = new BatchSendingService({
+                models: {EmailBatch}
+            });
+            const email = createModel({
+                status: 'submitting',
+                newsletter: createModel({}),
+                post: createModel({})
+            });
+
+            const sendBatches = sinon.stub(service, 'sendBatches').resolves();
+            const createdBatches = [createModel({})];
+            const createBatches = sinon.stub(service, 'createBatches').resolves(createdBatches);
+            const result = await service.sendEmail(email);
+            assert.equal(result, undefined);
+            sinon.assert.calledOnce(sendBatches);
+            sinon.assert.calledOnce(createBatches);
+
+            // Check called with created batch
+            const argument = sendBatches.firstCall.args[0];
+            assert.equal(argument.batches, createdBatches);
+        });
     });
 
     describe('createBatches', function () {
@@ -282,7 +319,7 @@ describe('Batch Sending Service', function () {
                 ]
             }));
 
-            const innitialMembers = members.slice();
+            const initialMembers = members.slice();
 
             Member.getFilteredCollectionQuery = ({filter}) => {
                 // Everytime we request the members, we also create a new member, to simulate that creating batches doesn't happen in a transaction
@@ -296,6 +333,10 @@ describe('Batch Sending Service', function () {
                 }));
 
                 const q = nql(filter);
+                // Check that the filter id:<${lastId} is a string
+                // In rare cases when the object ID is numeric, the query returns unexpected results
+                assert.equal(typeof q.toJSON().$and[1].id.$lt, 'string');
+
                 const all = members.filter((member) => {
                     return q.queryJSON(member.toJSON());
                 });
@@ -326,7 +367,7 @@ describe('Batch Sending Service', function () {
                 },
                 emailSegmenter: {
                     getMemberFilterForSegment(n) {
-                        return `newsletters.id:${n.id}`;
+                        return `newsletters.id:'${n.id}'`;
                     }
                 },
                 db
@@ -357,10 +398,92 @@ describe('Batch Sending Service', function () {
             assert.equal(insertedRecipients.length, 16);
 
             // Check all recipients match initialMembers
-            assert.deepEqual(insertedRecipients.map(recipient => recipient.member_id).sort(), innitialMembers.map(member => member.id).sort());
+            assert.deepEqual(insertedRecipients.map(recipient => recipient.member_id).sort(), initialMembers.map(member => member.id).sort());
 
             // Check email_count set
             assert.equal(email.get('email_count'), 16);
+        });
+
+        it('Does log message to sentry if email_count is off by > 1%', async function () {
+            const Member = createModelClass({});
+            const EmailBatch = createModelClass({});
+            const newsletter = createModel({});
+
+            // Create 16 members in single line
+            const members = new Array(16).fill(0).map(i => createModel({
+                email: `example${i}@example.com`,
+                uuid: `member${i}`,
+                newsletters: [
+                    newsletter
+                ]
+            }));
+
+            Member.getFilteredCollectionQuery = ({filter}) => {
+                // Everytime we request the members, we also create a new member, to simulate that creating batches doesn't happen in a transaction
+                // These created members should be excluded
+                members.push(createModel({
+                    email: `example${members.length}@example.com`,
+                    uuid: `member${members.length}`,
+                    newsletters: [
+                        newsletter
+                    ]
+                }));
+
+                const q = nql(filter);
+                // Check that the filter id:<${lastId} is a string
+                // In rare cases when the object ID is numeric, the query returns unexpected results
+                assert.equal(typeof q.toJSON().$and[1].id.$lt, 'string');
+
+                const all = members.filter((member) => {
+                    return q.queryJSON(member.toJSON());
+                });
+
+                // Sort all by id desc (string)
+                all.sort((a, b) => {
+                    return b.id.localeCompare(a.id);
+                });
+                return createDb({
+                    all: all.map(member => member.toJSON())
+                });
+            };
+
+            const db = createDb({});
+            const captureMessage = sinon.stub();
+
+            const service = new BatchSendingService({
+                models: {Member, EmailBatch},
+                sentry: {
+                    captureMessage
+                },
+                emailRenderer: {
+                    getSegments() {
+                        return [null];
+                    }
+                },
+                sendingService: {
+                    getMaximumRecipients() {
+                        return 5;
+                    }
+                },
+                emailSegmenter: {
+                    getMemberFilterForSegment(n) {
+                        return `newsletters.id:'${n.id}'`;
+                    }
+                },
+                db
+            });
+
+            const email = createModel({
+                email_count: 15
+            });
+
+            await service.createBatches({
+                email,
+                post: createModel({}),
+                newsletter
+            });
+
+            assert(captureMessage.calledOnce);
         });
 
         it('works with multiple batches', async function () {
@@ -388,10 +511,14 @@ describe('Batch Sending Service', function () {
                 }))
             ];
 
-            const innitialMembers = members.slice();
+            const initialMembers = members.slice();
 
             Member.getFilteredCollectionQuery = ({filter}) => {
                 const q = nql(filter);
+                // Check that the filter id:<${lastId} is a string
+                // In rare cases when the object ID is numeric, the query returns unexpected results
+                assert.equal(typeof q.toJSON().$and[2].id.$lt, 'string');
+
                 const all = members.filter((member) => {
                     return q.queryJSON(member.toJSON());
                 });
@@ -422,7 +549,7 @@ describe('Batch Sending Service', function () {
                 },
                 emailSegmenter: {
                     getMemberFilterForSegment(n, _, segment) {
-                        return `newsletters.id:${n.id}+(${segment})`;
+                        return `newsletters.id:'${n.id}'+(${segment})`;
                     }
                 },
                 db
@@ -444,10 +571,115 @@ describe('Batch Sending Service', function () {
             assert.equal(insertedRecipients.length, 4);
 
             // Check all recipients match initialMembers
-            assert.deepEqual(insertedRecipients.map(recipient => recipient.member_id).sort(), innitialMembers.map(member => member.id).sort());
+            assert.deepEqual(insertedRecipients.map(recipient => recipient.member_id).sort(), initialMembers.map(member => member.id).sort());
 
             // Check email_count set
             assert.equal(email.get('email_count'), 4);
+        });
+
+        // NOTE: we can't fully test this because javascript can't handle a large number (e.g. 650706040078550001536020) - it uses scientific notation
+        //  so we have to use a string
+        //  ref: https://ghost.slack.com/archives/CTH5NDJMS/p1699359241142969
+        it('sends expected emails if a batch ends on a numeric id', async function () {
+            const Member = createModelClass({});
+            const EmailBatch = createModelClass({});
+            const newsletter = createModel({});
+
+            const members = [
+                createModel({
+                    id: '61a55008a9d68c003baec6df',
+                    email: `test1@numericid.com`,
+                    uuid: 'test1',
+                    status: 'free',
+                    newsletters: [
+                        newsletter
+                    ]
+                }),
+                createModel({
+                    id: '650706040078550001536020', // numeric object id
+                    email: `test2@numericid.com`,
+                    uuid: 'test2',
+                    status: 'free',
+                    newsletters: [
+                        newsletter
+                    ]
+                }),
+                createModel({
+                    id: '65070957007855000153605b',
+                    email: `test3@numericid.com`,
+                    uuid: 'test3',
+                    status: 'free',
+                    newsletters: [
+                        newsletter
+                    ]
+                })
+            ];
+
+            const initialMembers = members.slice();
+
+            Member.getFilteredCollectionQuery = ({filter}) => {
+                const q = nql(filter);
+                // Check that the filter id:<${lastId} is a string
+                // In rare cases when the object ID is numeric, the query returns unexpected results
+                assert.equal(typeof q.toJSON().$and[2].id.$lt, 'string');
+
+                const all = members.filter((member) => {
+                    return q.queryJSON(member.toJSON());
+                });
+
+                // Sort all by id desc (string) - this is how we keep the order of members consistent (object id is a proxy for created_at)
+                all.sort((a, b) => {
+                    return b.id.localeCompare(a.id);
+                });
+
+                return createDb({
+                    all: all.map(member => member.toJSON())
+                });
+            };
+
+            const db = createDb({});
+            const insert = sinon.spy(db, 'insert');
+
+            const service = new BatchSendingService({
+                models: {Member, EmailBatch},
+                emailRenderer: {
+                    getSegments() {
+                        return ['status:free'];
+                    }
+                },
+                sendingService: {
+                    getMaximumRecipients() {
+                        return 2; // pick a batch size that ends with a numeric member object id
+                    }
+                },
+                emailSegmenter: {
+                    getMemberFilterForSegment(n, _, segment) {
+                        return `newsletters.id:'${n.id}'+(${segment})`;
+                    }
+                },
+                db
+            });
+
+            const email = createModel({});
+
+            const batches = await service.createBatches({
+                email,
+                post: createModel({}),
+                newsletter
+            });
+            assert.equal(batches.length, 2);
+
+            const calls = insert.getCalls();
+            assert.equal(calls.length, 2);
+
+            const insertedRecipients = calls.flatMap(call => call.args[0]);
+            assert.equal(insertedRecipients.length, 3);
+
+            // Check all recipients match initialMembers
+            assert.deepEqual(insertedRecipients.map(recipient => recipient.member_id).sort(), initialMembers.map(member => member.id).sort());
+
+            // Check email_count set
+            assert.equal(email.get('email_count'), 3);
         });
     });
 
@@ -484,9 +716,37 @@ describe('Batch Sending Service', function () {
         });
     });
 
+    describe('getBatches', function () {
+        it('returns an array of batch models', async function () {
+            const email = createModel({
+                id: '123'
+            });
+            const emailBatches = [
+                createModel({email_id: '123'}),
+                createModel({email_id: '123'})
+            ];
+
+            const EmailBatch = createModelClass({
+                findAll: emailBatches
+            });
+            const service = new BatchSendingService({
+                models: {EmailBatch}
+            });
+            const batches = await service.getBatches(email);
+            assert.equal(batches.length, 2);
+            assert.ok(Array.isArray(batches));
+        });
+    });
+
     describe('sendBatches', function () {
         it('Works for a single batch', async function () {
-            const service = new BatchSendingService({});
+            const service = new BatchSendingService({
+                sendingService: {
+                    getTargetDeliveryWindow() {
+                        return 0;
+                    }
+                }
+            });
             const sendBatch = sinon.stub(service, 'sendBatch').callsFake(() => {
                 return Promise.resolve(true);
             });
@@ -505,13 +765,20 @@ describe('Batch Sending Service', function () {
         });
 
         it('Works for more than 2 batches', async function () {
-            const service = new BatchSendingService({});
+            const clock = sinon.useFakeTimers(new Date());
+            const service = new BatchSendingService({
+                sendingService: {
+                    getTargetDeliveryWindow() {
+                        return 0;
+                    }
+                }
+            });
             let runningCount = 0;
             let maxRunningCount = 0;
             const sendBatch = sinon.stub(service, 'sendBatch').callsFake(async () => {
                 runningCount += 1;
                 maxRunningCount = Math.max(maxRunningCount, runningCount);
-                await sleep(5);
+                await simulateSleep(5, clock);
                 runningCount -= 1;
                 return Promise.resolve(true);
             });
@@ -526,16 +793,142 @@ describe('Batch Sending Service', function () {
             const sendBatches = sendBatch.getCalls().map(call => call.args[0].batch);
             assert.deepEqual(sendBatches, batches);
             assert.equal(maxRunningCount, 2);
+            clock.restore();
+        });
+
+        it('Works with a target delivery window set', async function () {
+            // Set some parameters for sending the batches
+            const now = new Date();
+            const clock = sinon.useFakeTimers(now);
+            const targetDeliveryWindow = 300000; // 5 minutes
+            const expectedDeadline = new Date(now.getTime() + targetDeliveryWindow);
+            const numBatches = 10;
+            const expectedBatchDelay = targetDeliveryWindow / numBatches;
+            const email = createModel({
+                created_at: now
+            });
+            const service = new BatchSendingService({
+                sendingService: {
+                    getTargetDeliveryWindow() {
+                        return targetDeliveryWindow;
+                    }
+                }
+            });
+            let runningCount = 0;
+            let maxRunningCount = 0;
+            // Stub the sendBatch method to inspect the delivery times for each batch
+            const sendBatch = sinon.stub(service, 'sendBatch').callsFake(async () => {
+                runningCount += 1;
+                maxRunningCount = Math.max(maxRunningCount, runningCount);
+                await simulateSleep(5, clock);
+                runningCount -= 1;
+                return Promise.resolve(true);
+            });
+            // Create the batches
+            const batches = new Array(numBatches).fill(0).map(() => createModel({}));
+            // Invoke the sendBatches method to send the batches
+            await service.sendBatches({
+                email,
+                batches,
+                post: createModel({}),
+                newsletter: createModel({})
+            });
+            // Assert that the sendBatch method was called the correct number of times
+            sinon.assert.callCount(sendBatch, numBatches);
+            // Get the batches there were sent from the sendBatch method calls
+            const sendBatches = sendBatch.getCalls().map(call => call.args[0].batch);
+            // Get the delivery times for each batch from the sendBatch method calls
+            const deliveryTimes = sendBatch.getCalls().map(call => call.args[0].deliveryTime);
+
+            // Make sure all delivery times are valid dates, and are before the deadline
+            deliveryTimes.forEach((time) => {
+                assert.ok(time instanceof Date);
+                assert.ok(!isNaN(time.getTime()));
+                assert.ok(time <= expectedDeadline);
+            });
+            // Make sure the delivery times are evenly spaced out, within a reasonable range
+            // Sort the delivery times in ascending order (just in case they're not in order)
+            deliveryTimes.sort((a, b) => a.getTime() - b.getTime());
+            const differences = [];
+            for (let i = 1; i < deliveryTimes.length; i++) {
+                differences.push(deliveryTimes[i].getTime() - deliveryTimes[i - 1].getTime());
+            }
+            // Make sure the differences are within a few ms of the expected batch delay
+            differences.forEach((difference) => {
+                assert.ok(difference >= expectedBatchDelay - 100, `Difference ${difference} is less than expected ${expectedBatchDelay}`);
+                assert.ok(difference <= expectedBatchDelay + 100, `Difference ${difference} is greater than expected ${expectedBatchDelay}`);
+            });
+            assert.deepEqual(sendBatches, batches);
+            assert.equal(maxRunningCount, 2);
+            clock.restore();
+        });
+
+        it('omits deliverytime if deadline is in the past', async function () {
+            // Set some parameters for sending the batches
+            const now = new Date();
+            const clock = sinon.useFakeTimers(now);
+            const targetDeliveryWindow = 300000; // 5 minutes
+            const numBatches = 10;
+            const email = createModel({
+                created_at: now
+            });
+            const service = new BatchSendingService({
+                sendingService: {
+                    getTargetDeliveryWindow() {
+                        return targetDeliveryWindow;
+                    }
+                }
+            });
+            let runningCount = 0;
+            let maxRunningCount = 0;
+            // Stub the sendBatch method to inspect the delivery times for each batch
+            const sendBatch = sinon.stub(service, 'sendBatch').callsFake(async () => {
+                runningCount += 1;
+                maxRunningCount = Math.max(maxRunningCount, runningCount);
+                await simulateSleep(5, clock);
+                runningCount -= 1;
+                return Promise.resolve(true);
+            });
+            // Create the batches
+            const batches = new Array(numBatches).fill(0).map(() => createModel({}));
+            // Invoke the sendBatches method to send the batches
+            clock.tick(1000000);
+            await service.sendBatches({
+                email,
+                batches,
+                post: createModel({}),
+                newsletter: createModel({})
+            });
+            // Assert that the sendBatch method was called the correct number of times
+            sinon.assert.callCount(sendBatch, numBatches);
+            // Get the batches there were sent from the sendBatch method calls
+            const sendBatches = sendBatch.getCalls().map(call => call.args[0].batch);
+            // Get the delivery times for each batch from the sendBatch method calls
+            const deliveryTimes = sendBatch.getCalls().map(call => call.args[0].deliveryTime);
+            // Assert that the deliverytime is not set, since we're past the deadline
+            deliveryTimes.forEach((time) => {
+                assert.equal(time, undefined);
+            });
+            assert.deepEqual(sendBatches, batches);
+            assert.equal(maxRunningCount, 2);
+            clock.restore();
         });
 
         it('Throws error if all batches fail', async function () {
-            const service = new BatchSendingService({});
+            const clock = sinon.useFakeTimers(new Date());
+            const service = new BatchSendingService({
+                sendingService: {
+                    getTargetDeliveryWindow() {
+                        return 0;
+                    }
+                }
+            });
             let runningCount = 0;
             let maxRunningCount = 0;
             const sendBatch = sinon.stub(service, 'sendBatch').callsFake(async () => {
                 runningCount += 1;
                 maxRunningCount = Math.max(maxRunningCount, runningCount);
-                await sleep(5);
+                await simulateSleep(5, clock);
                 runningCount -= 1;
                 return Promise.resolve(false);
             });
@@ -550,32 +943,48 @@ describe('Batch Sending Service', function () {
             const sendBatches = sendBatch.getCalls().map(call => call.args[0].batch);
             assert.deepEqual(sendBatches, batches);
             assert.equal(maxRunningCount, 2);
+            clock.restore();
         });
 
         it('Throws error if a single batch fails', async function () {
-            const service = new BatchSendingService({});
+            const clock = sinon.useFakeTimers(new Date());
+            const service = new BatchSendingService({
+                sendingService: {
+                    getTargetDeliveryWindow() {
+                        return 0;
+                    }
+                }
+            });
             let runningCount = 0;
             let maxRunningCount = 0;
             let callCount = 0;
             const sendBatch = sinon.stub(service, 'sendBatch').callsFake(async () => {
                 runningCount += 1;
                 maxRunningCount = Math.max(maxRunningCount, runningCount);
-                await sleep(5);
+                await simulateSleep(5, clock);
                 runningCount -= 1;
                 callCount += 1;
                 return Promise.resolve(callCount === 12 ? false : true);
             });
             const batches = new Array(101).fill(0).map(() => createModel({}));
+
+            /**
+             * !! WARNING !!
+             * If the error message is changed that it no longer contains the word 'partially',
+             * we'll also need the frontend logic in ghost/admin/app/components/editor/modals/publish-flow/complete-with-email-error.js
+             */
             await assert.rejects(service.sendBatches({
                 email: createModel({}),
                 batches,
                 post: createModel({}),
                 newsletter: createModel({})
-            }), /was only partially sent/);
+            }), /was only partially sent/); // do not change without reading the warning above
+
             sinon.assert.callCount(sendBatch, 101);
             const sendBatches = sendBatch.getCalls().map(call => call.args[0].batch);
             assert.deepEqual(sendBatches, batches);
             assert.equal(maxRunningCount, 2);
+            clock.restore();
         });
     });
 
@@ -675,6 +1084,50 @@ describe('Batch Sending Service', function () {
 
             const {members} = sendingService.send.firstCall.args[0];
             assert.equal(members.length, 2);
+        });
+
+        it('Does send with a deliverytime', async function () {
+            const EmailBatch = createModelClass({
+                findOne: {
+                    status: 'pending',
+                    member_segment: null
+                }
+            });
+            const sendingService = {
+                send: sinon.stub().resolves({id: 'providerid@example.com'}),
+                getMaximumRecipients: () => 5
+            };
+
+            const findOne = sinon.spy(EmailBatch, 'findOne');
+            const service = new BatchSendingService({
+                models: {EmailBatch, EmailRecipient},
+                sendingService
+            });
+
+            const inputDeliveryTime = new Date(Date.now() + 10000);
+
+            const result = await service.sendBatch({
+                email: createModel({}),
+                batch: createModel({}),
+                post: createModel({}),
+                newsletter: createModel({}),
+                deliveryTime: inputDeliveryTime
+            });
+
+            assert.equal(result, true);
+            sinon.assert.notCalled(errorLog);
+            sinon.assert.calledOnce(sendingService.send);
+
+            sinon.assert.calledOnce(findOne);
+            const batch = await findOne.firstCall.returnValue;
+            assert.equal(batch.get('status'), 'submitted');
+            assert.equal(batch.get('provider_id'), 'providerid@example.com');
+
+            const {members} = sendingService.send.firstCall.args[0];
+            assert.equal(members.length, 2);
+
+            const {deliveryTime: outputDeliveryTime} = sendingService.send.firstCall.args[1];
+            assert.equal(inputDeliveryTime, outputDeliveryTime);
         });
 
         it('Does save error', async function () {
@@ -882,9 +1335,10 @@ describe('Batch Sending Service', function () {
             assert.equal(members.length, 2);
         });
 
-        it('Truncates recipients if more than the maximum are returned in a batch', async function () {
+        it('Throws error if more than the maximum are returned in a batch', async function () {
             const EmailBatch = createModelClass({
                 findOne: {
+                    id: '123_batch_id',
                     status: 'pending',
                     member_segment: null
                 }
@@ -896,6 +1350,7 @@ describe('Batch Sending Service', function () {
                     {
                         member_id: '123',
                         member_uuid: '123',
+                        batch_id: '123_batch_id',
                         member_email: 'example@example.com',
                         member_name: 'Test User',
                         loaded: ['member'],
@@ -910,6 +1365,7 @@ describe('Batch Sending Service', function () {
                     {
                         member_id: '124',
                         member_uuid: '124',
+                        batch_id: '123_batch_id',
                         member_email: 'example2@example.com',
                         member_name: 'Test User 2',
                         loaded: ['member'],
@@ -924,6 +1380,7 @@ describe('Batch Sending Service', function () {
                     {
                         member_id: '125',
                         member_uuid: '125',
+                        batch_id: '123_batch_id',
                         member_email: 'example3@example.com',
                         member_name: 'Test User 3',
                         loaded: ['member'],
@@ -935,10 +1392,11 @@ describe('Batch Sending Service', function () {
                             products: []
                         })
                     },
-                    // NOTE: one recipient with a duplicate data
+                    // NOTE: one recipient from a different batch
                     {
                         member_id: '125',
                         member_uuid: '125',
+                        batch_id: '124_ANOTHER_batch_id',
                         member_email: 'example3@example.com',
                         member_name: 'Test User 3',
                         loaded: ['member'],
@@ -961,34 +1419,23 @@ describe('Batch Sending Service', function () {
             const service = new BatchSendingService({
                 models: {EmailBatch, EmailRecipient: DoubleTheEmailRecipients},
                 sendingService,
-                BEFORE_RETRY_CONFIG: {maxRetries: 10, maxTime: 2000, sleep: 1}
+                BEFORE_RETRY_CONFIG: {maxRetries: 1, maxTime: 2000, sleep: 1}
             });
 
             const result = await service.sendBatch({
                 email: createModel({}),
-                batch: createModel({}),
+                batch: createModel({
+                    id: '123_batch_id'
+                }),
                 post: createModel({}),
                 newsletter: createModel({})
             });
 
-            assert.equal(result, true);
-            sinon.assert.calledThrice(errorLog);
-            const firstLoggedError = errorLog.firstCall.args[0];
-            const secondLoggedError = errorLog.secondCall.args[0];
-            const thirdLoggedError = errorLog.thirdCall.args[0];
-
-            assert.match(firstLoggedError, /Batch [a-f0-9]{24} has 4 members, but the sending service only supports 2 members per batch/);
-            assert.match(secondLoggedError, /Email batch [a-f0-9]{24} has 4 members, which exceeds the maximum of 2. Filtering to unique members/);
-            assert.match(thirdLoggedError, /Email batch [a-f0-9]{24} has 3 members, which exceeds the maximum of 2. Truncating to 2/);
-
-            sinon.assert.calledOnce(sendingService.send);
-            const {members} = sendingService.send.firstCall.args[0];
-            assert.equal(members.length, 2);
+            assert.equal(result, false);
 
             sinon.assert.calledOnce(findOne);
             const batch = await findOne.firstCall.returnValue;
-            assert.equal(batch.get('status'), 'submitted');
-            assert.equal(batch.get('provider_id'), 'providerid@example.com');
+            assert.equal(batch.get('status'), 'failed');
         });
 
         it('Stops retrying after the email retry cut off time', async function () {
@@ -1041,199 +1488,6 @@ describe('Batch Sending Service', function () {
             assert.equal(loggedExeption.code, 'BULK_EMAIL_DB_RETRY');
 
             sinon.assert.notCalled(sendingService.send);
-        });
-
-        it('Dumps members information into a file when recipients count is over the sender limit', async function () {
-            const fs = require('fs-extra');
-
-            const EmailBatch = createModelClass({
-                findOne: {
-                    status: 'pending',
-                    member_segment: null
-                }
-            });
-            const findOne = sinon.spy(EmailBatch, 'findOne');
-            const fsStub = sinon.stub(fs, 'writeFile').resolves();
-            const dbMembers = [
-                {
-                    member_id: '123',
-                    member_uuid: '123',
-                    member_email: 'example@example.com',
-                    member_name: 'Test User',
-                    loaded: ['member'],
-                    member: createModel({
-                        created_at: new Date(),
-                        loaded: ['stripeSubscriptions', 'products'],
-                        status: 'free',
-                        stripeSubscriptions: [],
-                        products: []
-                    })
-                },
-                {
-                    member_id: '124',
-                    member_uuid: '124',
-                    member_email: 'example2@example.com',
-                    member_name: 'Test User 2',
-                    loaded: ['member'],
-                    member: createModel({
-                        created_at: new Date(),
-                        status: 'free',
-                        loaded: ['stripeSubscriptions', 'products'],
-                        stripeSubscriptions: [],
-                        products: []
-                    })
-                },
-                {
-                    member_id: '125',
-                    member_uuid: '125',
-                    member_email: 'example3@example.com',
-                    member_name: 'Test User 3',
-                    loaded: ['member'],
-                    member: createModel({
-                        created_at: new Date(),
-                        status: 'free',
-                        loaded: ['stripeSubscriptions', 'products'],
-                        stripeSubscriptions: [],
-                        products: []
-                    })
-                },
-                {
-                    member_id: '125',
-                    member_uuid: '125',
-                    member_email: 'example3@example.com',
-                    member_name: 'Test User 3',
-                    loaded: ['member'],
-                    member: createModel({
-                        created_at: new Date(),
-                        status: 'free',
-                        loaded: ['stripeSubscriptions', 'products'],
-                        stripeSubscriptions: [],
-                        products: []
-                    })
-                }
-            ];
-
-            const DoubleTheEmailRecipients = createModelClass({
-                findAll: dbMembers
-            });
-
-            const sendingService = {
-                send: sinon.stub().resolves({id: 'providerid@example.com'}),
-                getMaximumRecipients: () => 2
-            };
-
-            const service = new BatchSendingService({
-                models: {
-                    EmailBatch,
-                    EmailRecipient: DoubleTheEmailRecipients
-                },
-                sendingService,
-                BEFORE_RETRY_CONFIG: {maxRetries: 10, maxTime: 2000, sleep: 1},
-                debugStorageFilePath: '/tmp/'
-            });
-
-            const result = await service.sendBatch({
-                email: createModel({}),
-                batch: createModel({}),
-                post: createModel({}),
-                newsletter: createModel({})
-            });
-
-            // dumps the members into a file
-            assert.ok(fsStub.calledOnce);
-            assert.match(fsStub.firstCall.args[0], /\/tmp\/email-batch-sending-members-(.+)Z\.json/);
-            assert.match(fsStub.firstCall.args[1], /example@example.com/gi);
-
-            // still sends the batch
-            assert.equal(result, true);
-            sinon.assert.calledOnce(sendingService.send);
-
-            const {members} = sendingService.send.firstCall.args[0];
-            assert.equal(members.length, 2);
-
-            sinon.assert.calledOnce(findOne);
-            const batch = await findOne.firstCall.returnValue;
-            assert.equal(batch.get('status'), 'submitted');
-            assert.equal(batch.get('provider_id'), 'providerid@example.com');
-        });
-
-        it('Catches an error when dumping members into a file', async function () {
-            const fs = require('fs-extra');
-
-            const EmailBatch = createModelClass({
-                findOne: {
-                    status: 'pending',
-                    member_segment: null
-                }
-            });
-            const dbMembers = [
-                {
-                    member_id: '123',
-                    member_uuid: '123',
-                    member_email: 'example@example.com',
-                    member_name: 'Test User',
-                    loaded: ['member'],
-                    member: createModel({
-                        created_at: new Date(),
-                        loaded: ['stripeSubscriptions', 'products'],
-                        status: 'free',
-                        stripeSubscriptions: [],
-                        products: []
-                    })
-                },
-                {
-                    member_id: '124',
-                    member_uuid: '124',
-                    member_email: 'example2@example.com',
-                    member_name: 'Test User 2',
-                    loaded: ['member'],
-                    member: createModel({
-                        created_at: new Date(),
-                        status: 'free',
-                        loaded: ['stripeSubscriptions', 'products'],
-                        stripeSubscriptions: [],
-                        products: []
-                    })
-                }
-            ];
-
-            const fsStub = sinon.stub(fs, 'writeFile').rejects('oops');
-
-            const DoubleTheEmailRecipients = createModelClass({
-                findAll: dbMembers
-            });
-
-            const sendingService = {
-                send: sinon.stub().resolves({id: 'providerid@example.com'}),
-                getMaximumRecipients: () => 1
-            };
-
-            const service = new BatchSendingService({
-                models: {
-                    EmailBatch,
-                    EmailRecipient: DoubleTheEmailRecipients
-                },
-                sendingService,
-                BEFORE_RETRY_CONFIG: {maxRetries: 10, maxTime: 2000, sleep: 1},
-                debugStorageFilePath: '/tmp/'
-            });
-
-            await service.sendBatch({
-                email: createModel({}),
-                batch: createModel({}),
-                post: createModel({}),
-                newsletter: createModel({})
-            });
-
-            assert.ok(fsStub.calledOnce);
-            assert.equal(errorLog.callCount, 5, 'should have logged 5 errors');
-            const firstLoggedError = errorLog.firstCall.args[0];
-            const secondLoggedError = errorLog.secondCall.args[0];
-            const thirdLoggedError = errorLog.thirdCall.args[0];
-
-            assert.match(firstLoggedError, /Batch [a-f0-9]{24} has 2 members, but the sending service only supports 1 members per batch/);
-            assert.match(secondLoggedError, /Failed to write members object dump to/);
-            assert.equal(thirdLoggedError.name, 'oops');
         });
     });
 
@@ -1311,6 +1565,7 @@ describe('Batch Sending Service', function () {
             });
             await assert.rejects(result, /Test error/);
             assert.equal(callCount, 3);
+            clock.restore();
         });
 
         it('Stops after maxTime', async function () {
@@ -1326,6 +1581,7 @@ describe('Batch Sending Service', function () {
             });
             await assert.rejects(result, /Test error/);
             assert.equal(callCount, 3);
+            clock.restore();
         });
 
         it('Resolves after maxTime', async function () {
@@ -1345,6 +1601,7 @@ describe('Batch Sending Service', function () {
             });
             assert.equal(result, 'ok');
             assert.equal(callCount, 3);
+            clock.restore();
         });
 
         it('Resolves with stopAfterDate', async function () {
@@ -1363,6 +1620,145 @@ describe('Batch Sending Service', function () {
             });
             assert.equal(result, 'ok');
             assert.equal(callCount, 4);
+            clock.restore();
+        });
+    });
+
+    describe('getDeliveryDeadline', function () {
+        it('returns undefined if the targetDeliveryWindow is not set', async function () {
+            const email = createModel({
+                created_at: new Date()
+            });
+            const service = new BatchSendingService({
+                sendingService: {
+                    getTargetDeliveryWindow() {
+                        return 0;
+                    }
+                }
+            });
+            const result = service.getDeliveryDeadline(email);
+            assert.equal(result, undefined, 'getDeliveryDeadline should return undefined if target delivery window is <=0');
+        });
+
+        it('returns undefined if the email.created_at is not set', async function () { 
+            const email = createModel({});
+            const service = new BatchSendingService({
+                sendingService: {
+                    getTargetDeliveryWindow() {
+                        return 300000; // 5 minutes
+                    }
+                }
+            });
+            const result = service.getDeliveryDeadline(email);
+            assert.equal(result, undefined, 'getDeliveryDeadline should return undefined if email.created_at is not set');
+        });
+
+        it('returns undefined if the email.created_at is not a valid date', async function () {
+            const email = createModel({
+                created_at: 'not a date'
+            });
+            const service = new BatchSendingService({
+                sendingService: {
+                    getTargetDeliveryWindow() {
+                        return 300000; // 5 minutes
+                    }
+                }
+            });
+            const result = service.getDeliveryDeadline(email);
+            assert.equal(result, undefined, 'getDeliveryDeadline should return undefined if email.created_at is not a valid date');
+        });
+
+        it('returns the correct deadline if targetDeliveryWindow is set', async function () {
+            const TARGET_DELIVERY_WINDOW = 300000; // 5 minutes
+            const emailCreatedAt = new Date();
+            const email = createModel({
+                created_at: emailCreatedAt
+            });
+            const expectedDeadline = new Date(emailCreatedAt.getTime() + TARGET_DELIVERY_WINDOW);
+            const service = new BatchSendingService({
+                sendingService: {
+                    getTargetDeliveryWindow() {
+                        return TARGET_DELIVERY_WINDOW;
+                    }
+                }
+            });
+            const result = service.getDeliveryDeadline(email);
+            assert.equal(typeof result, 'object');
+            assert.equal(result.toUTCString(), expectedDeadline.toUTCString(), 'The delivery deadline should be 5 minutes after the email.created_at timestamp');
+        });
+    });
+
+    describe('calculateDeliveryTimes', function () {
+        it('does add the correct deliverytimes if we are not past the deadline yet', async function () {
+            const now = new Date();
+            const clock = sinon.useFakeTimers(now);
+            const TARGET_DELIVERY_WINDOW = 300000; // 5 minutes
+            const email = createModel({
+                created_at: now
+            });
+            const numBatches = 5;
+            const delay = TARGET_DELIVERY_WINDOW / numBatches;
+
+            const service = new BatchSendingService({
+                sendingService: {
+                    getTargetDeliveryWindow() {
+                        return TARGET_DELIVERY_WINDOW;
+                    }
+                }
+            });
+            const expectedResult = [
+                new Date(now.getTime() + (delay * 0)),
+                new Date(now.getTime() + (delay * 1)),
+                new Date(now.getTime() + (delay * 2)),
+                new Date(now.getTime() + (delay * 3)),
+                new Date(now.getTime() + (delay * 4))
+            ];
+            const result = service.calculateDeliveryTimes(email, numBatches);
+            assert.deepEqual(result, expectedResult);
+            clock.restore();
+        });
+
+        it('returns an array of undefined values if we are past the deadline', async function () {
+            const now = new Date();
+            const clock = sinon.useFakeTimers(now);
+            const TARGET_DELIVERY_WINDOW = 300000; // 5 minutes
+            const email = createModel({
+                created_at: now
+            });
+            const numBatches = 5;
+            const service = new BatchSendingService({
+                sendingService: {
+                    getTargetDeliveryWindow() {
+                        return TARGET_DELIVERY_WINDOW;
+                    }
+                }
+            });
+            const expectedResult = [
+                undefined, undefined, undefined, undefined, undefined
+            ];
+            // Advance time past the deadline
+            clock.tick(1000000);
+            const result = service.calculateDeliveryTimes(email, numBatches);
+            assert.deepEqual(result, expectedResult);
+            clock.restore();
+        });
+
+        it('returns an array of undefined values if the target delivery window is not set', async function () {
+            const TARGET_DELIVERY_WINDOW = 0;
+            const email = createModel({});
+            const numBatches = 5;
+            const service = new BatchSendingService({
+                sendingService: {
+                    getTargetDeliveryWindow() {
+                        return TARGET_DELIVERY_WINDOW;
+                    }
+                }
+            });
+            const expectedResult = [
+                undefined, undefined, undefined, undefined, undefined
+            ];
+            const result = service.calculateDeliveryTimes(email, numBatches);
+            assert.deepEqual(result, expectedResult);
         });
     });
 });
